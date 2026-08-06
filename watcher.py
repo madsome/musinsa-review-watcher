@@ -185,14 +185,23 @@ def stars(grade: int) -> str:
 
 
 def build_subject(groups) -> str:
-    total = sum(len(v) for v in groups.values())
-    parts = [f"{k} {len(v)}건" for k, v in groups.items() if v]
-    low = sum(1 for v in groups.values() for r in v if 0 < r["grade"] <= 3)
+    """제목이 너무 길어지지 않도록 상품이 많으면 앞 3개만 쓰고 나머지는 묶는다."""
+    total = sum(len(g["items"]) for g in groups.values())
+    hit = [(g["label"], len(g["items"])) for g in groups.values() if g["items"]]
+    hit.sort(key=lambda x: -x[1])
+
+    if len(hit) <= 3:
+        detail = ", ".join(f"{lab} {n}건" for lab, n in hit)
+    else:
+        head = ", ".join(f"{lab} {n}건" for lab, n in hit[:3])
+        detail = f"{head} 외 {len(hit) - 3}개 상품"
+
+    low = sum(1 for g in groups.values() for r in g["items"] if 0 < r["grade"] <= 3)
     flag = " ⚠️저평점 포함" if low else ""
-    return f"[무신사 후기] 새 후기 {total}건 ({', '.join(parts)}){flag}"
+    return f"[무신사 후기] 새 후기 {total}건 ({detail}){flag}"
 
 
-def build_html(groups, totals, config) -> str:
+def build_html(groups, config) -> str:
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
     watch = config.get("watch_keywords", [])
 
@@ -202,35 +211,44 @@ def build_html(groups, totals, config) -> str:
     out = [
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\','
         "'Malgun Gothic',sans-serif;max-width:760px;margin:0 auto;color:#1a1a1a;line-height:1.6\">",
-        f'<h2 style="margin:0 0 4px">새 후기 {sum(len(v) for v in groups.values())}건</h2>',
+        f'<h2 style="margin:0 0 4px">새 후기 '
+        f'{sum(len(g["items"]) for g in groups.values())}건</h2>',
         f'<p style="margin:0 0 20px;color:#666;font-size:13px">확인 시각 {now} (KST)</p>',
     ]
 
-    # 요약
+    # 요약 — 새 후기가 있는 상품만, 많은 순으로
+    ranked = sorted((g for g in groups.values() if g["items"]),
+                    key=lambda g: -len(g["items"]))
     out.append('<table style="border-collapse:collapse;width:100%;font-size:14px;margin-bottom:24px">')
     out.append('<tr style="background:#1f4e79;color:#fff">'
-               '<th style="padding:8px;text-align:left">색상</th>'
+               '<th style="padding:8px;text-align:left">상품</th>'
                '<th style="padding:8px">새 후기</th>'
                '<th style="padding:8px">평균 평점</th>'
                '<th style="padding:8px">누적 후기</th></tr>')
-    for label, rows in groups.items():
-        graded = [r["grade"] for r in rows if r["grade"] > 0]
+    for g in ranked:
+        graded = [r["grade"] for r in g["items"] if r["grade"] > 0]
         avg = f"{sum(graded)/len(graded):.2f}" if graded else "-"
         out.append(
             '<tr style="border-bottom:1px solid #e5e5e5">'
-            f'<td style="padding:8px"><b>{esc(label)}</b></td>'
-            f'<td style="padding:8px;text-align:center">{len(rows)}</td>'
+            f'<td style="padding:8px"><b>{esc(g["label"])}</b></td>'
+            f'<td style="padding:8px;text-align:center">{len(g["items"])}</td>'
             f'<td style="padding:8px;text-align:center">{avg}</td>'
-            f'<td style="padding:8px;text-align:center">{totals.get(label, "-")}</td></tr>'
+            f'<td style="padding:8px;text-align:center">{g["total"]}</td></tr>'
         )
+    quiet = [g["label"] for g in groups.values() if not g["items"]]
+    if quiet:
+        out.append(f'<tr><td colspan="4" style="padding:8px;color:#999;font-size:12px">'
+                   f'새 후기 없음: {esc(", ".join(quiet))}</td></tr>')
     out.append("</table>")
 
     # 개별 후기
-    for label, rows in groups.items():
-        if not rows:
-            continue
+    for g in ranked:
+        rows = g["items"]
         out.append('<h3 style="margin:24px 0 8px;padding-bottom:6px;'
-                   f'border-bottom:2px solid #1f4e79">{esc(label)}</h3>')
+                   f'border-bottom:2px solid #1f4e79">{esc(g["label"])}'
+                   f'<span style="font-weight:normal;font-size:12px;color:#888"> · '
+                   f'<a href="https://www.musinsa.com/review/goods/{g["goods_no"]}?sort=new" '
+                   f'style="color:#888">후기 페이지</a></span></h3>')
         for r in rows:
             low = 0 < r["grade"] <= 3
             hits = [k for k in watch if k in r["content"]]
@@ -263,29 +281,26 @@ def build_html(groups, totals, config) -> str:
             body.append("</div>")
             out.append("".join(body))
 
-    # 링크
-    out.append('<p style="margin-top:24px;font-size:13px;color:#666">')
-    for p in config["products"]:
-        out.append(f'<a href="https://www.musinsa.com/review/goods/{p["goods_no"]}?sort=new" '
-                   f'style="color:#1f4e79;margin-right:12px">{esc(p["label"])} 후기 페이지</a>')
-    out.append("</p>")
-    out.append('<p style="font-size:11px;color:#999;margin-top:16px">'
-               'musinsa-review-watcher · 후기 본문은 원문 그대로이며 편집하지 않았습니다.</p>')
+    out.append(f'<p style="font-size:11px;color:#999;margin-top:24px">'
+               f'musinsa-review-watcher · 감시 중인 상품 {len(config["products"])}개 · '
+               '후기 본문은 원문 그대로이며 편집하지 않았습니다.</p>')
     out.append("</div>")
     return "".join(out)
 
 
-def build_text(groups, totals) -> str:
+def build_text(groups) -> str:
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-    lines = [f"새 후기 {sum(len(v) for v in groups.values())}건 · 확인 시각 {now} (KST)", ""]
-    for label, rows in groups.items():
-        graded = [r["grade"] for r in rows if r["grade"] > 0]
+    ranked = sorted((g for g in groups.values() if g["items"]),
+                    key=lambda g: -len(g["items"]))
+    lines = [f"새 후기 {sum(len(g['items']) for g in groups.values())}건 · 확인 시각 {now} (KST)", ""]
+    for g in ranked:
+        graded = [r["grade"] for r in g["items"] if r["grade"] > 0]
         avg = f"{sum(graded)/len(graded):.2f}" if graded else "-"
-        lines.append(f"- {label}: {len(rows)}건, 평균 {avg} (누적 {totals.get(label, '-')}건)")
+        lines.append(f"- {g['label']}: {len(g['items'])}건, 평균 {avg} (누적 {g['total']}건)")
     lines.append("")
-    for label, rows in groups.items():
-        for r in rows:
-            head = f"[{label}] {stars(r['grade'])} · {r['created_at']}"
+    for g in ranked:
+        for r in g["items"]:
+            head = f"[{g['label']}] {stars(r['grade'])} · {r['created_at']}"
             if r["size"]:
                 head += f" · 사이즈 {r['size']}"
             lines += [head, r["content"], ""]
@@ -346,12 +361,13 @@ def main() -> int:
     if args.since_days is not None:
         since = datetime.now(KST) - timedelta(days=args.since_days)
 
+    # 상품번호를 키로 쓴다. label 이 겹쳐도 서로 섞이지 않는다.
     groups = {}
-    totals = {}
     changed = False
+    failed = []
 
     with requests.Session() as session:
-        for product in config["products"]:
+        for i, product in enumerate(config["products"]):
             key = str(product["goods_no"])
             label = product["label"]
             prev = state.get(key, {})
@@ -359,12 +375,23 @@ def main() -> int:
 
             baseline = (last_no == 0 or args.init) and since is None
             pages = 1 if baseline else max_pages
-            items, total = collect_new(product, last_no, pages, since, session)
 
-            totals[label] = total
-            groups[label] = [] if baseline else items
+            try:
+                items, total = collect_new(product, last_no, pages, since, session)
+            except RuntimeError as e:
+                # 한 상품이 실패해도 나머지는 계속 확인한다.
+                print(f"[{label}] 조회 실패: {e}", file=sys.stderr)
+                failed.append(label)
+                continue
 
-            newest = max([i["no"] for i in items], default=last_no)
+            groups[key] = {
+                "label": label,
+                "goods_no": product["goods_no"],
+                "total": total,
+                "items": [] if baseline else items,
+            }
+
+            newest = max([x["no"] for x in items], default=last_no)
             if newest != last_no or prev.get("total") != total:
                 state[key] = {
                     "label": label,
@@ -376,19 +403,25 @@ def main() -> int:
                 changed = True
 
             note = " (기준선 설정)" if baseline else ""
-            print(f"[{label}] 누적 {total}건 · 신규 {len(groups[label])}건{note}")
+            print(f"[{label}] 누적 {total}건 · 신규 {len(groups[key]['items'])}건{note}")
 
-    new_total = sum(len(v) for v in groups.values())
+            if i < len(config["products"]) - 1:
+                time.sleep(0.4)               # 상품 사이 간격
+
+    if failed:
+        print(f"[warn] {len(failed)}개 상품 조회 실패: {', '.join(failed)}", file=sys.stderr)
+
+    new_total = sum(len(g["items"]) for g in groups.values())
 
     if new_total == 0:
         if changed and not args.dry_run:
             save_state(state)
         print("새 후기 없음")
-        return 0
+        return 1 if failed else 0
 
     subject = build_subject(groups)
-    text = build_text(groups, totals)
-    html_body = build_html(groups, totals, config)
+    text = build_text(groups)
+    html_body = build_html(groups, config)
 
     if args.dry_run:
         print("\n" + "=" * 60)
@@ -402,7 +435,7 @@ def main() -> int:
     send_mail(subject, text, html_body)
     if changed:
         save_state(state)
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
