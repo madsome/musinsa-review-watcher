@@ -2,10 +2,10 @@ name: 무신사 후기 감시
 
 on:
   schedule:
-    # GitHub Actions 의 cron 은 UTC 기준. 2시간마다 실행.
+    # GitHub Actions 의 cron 은 UTC 기준. 1시간마다 실행.
     # 러너가 붐비면 수 분~수십 분 늦게 도는데, 신규 판별이 시간이 아니라
     # 후기 번호 기준이라 지연되거나 한 번 건너뛰어도 누락되지 않는다.
-    - cron: "0 */2 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       mode:
