@@ -38,7 +38,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -83,19 +83,42 @@ def save_state(state: dict) -> None:
 # 무신사 API
 # --------------------------------------------------------------------------- #
 
-def fetch_page(goods_no: int, page: int, session: requests.Session) -> dict:
+def product_key(product: dict) -> str:
+    """상태·그룹을 구분하는 키.
+
+    한 상품번호 안에 여러 색상이 옵션으로 묶인 상품이 있어서(예: 커브드 데님 팬츠 8 colors)
+    상품번호만으로는 색상끼리 구분되지 않는다. option1 이 있으면 키에 함께 넣는다.
+    """
+    opt = product.get("option1")
+    return f'{product["goods_no"]}|{opt}' if opt else str(product["goods_no"])
+
+
+def product_url(product: dict) -> str:
+    base = f'https://www.musinsa.com/review/goods/{product["goods_no"]}?sort=new'
+    opt = product.get("option1")
+    return base + (f"&option1List%5B0%5D={quote(opt)}" if opt else "")
+
+
+def fetch_page(goods_no: int, page: int, session: requests.Session, option1=None) -> dict:
     """후기 목록 한 페이지를 가져온다.
 
     selectedSimilarNo 를 goodsNo 와 같게 넣어야 해당 색상만 걸러진다.
     빼면 같은 시리즈의 다른 색상 후기까지 섞여 나온다.
+
+    option1 은 한 상품번호 안에서 색상이 옵션으로 갈리는 상품에만 쓴다.
+    무신사 후기 페이지의 색상 필터와 같은 값이며 번호 접두사까지 정확히 맞아야 한다
+    (예: "01.블랙"). 이 경우 selectedSimilarNo 는 넣지 않는다.
     """
     params = {
         "page": page,
         "pageSize": PAGE_SIZE,
         "goodsNo": goods_no,
-        "selectedSimilarNo": goods_no,
         "sort": "new",
     }
+    if option1:
+        params["option1List"] = option1
+    else:
+        params["selectedSimilarNo"] = goods_no
     url = f"{API_URL}?{urlencode(params)}"
 
     last_err = None
@@ -112,7 +135,8 @@ def fetch_page(goods_no: int, page: int, session: requests.Session) -> dict:
             last_err = e
             if attempt < 2:
                 time.sleep(2 * (attempt + 1))
-    raise RuntimeError(f"goodsNo={goods_no} page={page} 조회 실패: {last_err}")
+    tag = f"goodsNo={goods_no}" + (f" option1={option1}" if option1 else "")
+    raise RuntimeError(f"{tag} page={page} 조회 실패: {last_err}")
 
 
 def normalize(item: dict, label: str) -> dict:
@@ -140,11 +164,12 @@ def collect_new(product: dict, last_no: int, max_pages: int,
     """last_no 보다 큰 번호의 후기를 모두 모은다. (신규 목록, 전체 후기 수) 반환."""
     goods_no = product["goods_no"]
     label = product["label"]
+    option1 = product.get("option1")
     new_items = []
     total = 0
 
     for page in range(max_pages):
-        data = fetch_page(goods_no, page, session)
+        data = fetch_page(goods_no, page, session, option1)
         total = data.get("total", total)
         items = data.get("list") or []
         if not items:
@@ -247,7 +272,7 @@ def build_html(groups, config) -> str:
         out.append('<h3 style="margin:24px 0 8px;padding-bottom:6px;'
                    f'border-bottom:2px solid #1f4e79">{esc(g["label"])}'
                    f'<span style="font-weight:normal;font-size:12px;color:#888"> · '
-                   f'<a href="https://www.musinsa.com/review/goods/{g["goods_no"]}?sort=new" '
+                   f'<a href="{esc(g.get("url") or product_url(g))}" '
                    f'style="color:#888">후기 페이지</a></span></h3>')
         for r in rows:
             low = 0 < r["grade"] <= 3
@@ -368,7 +393,7 @@ def main() -> int:
 
     with requests.Session() as session:
         for i, product in enumerate(config["products"]):
-            key = str(product["goods_no"])
+            key = product_key(product)
             label = product["label"]
             prev = state.get(key, {})
             last_no = int(prev.get("last_no", 0))
@@ -387,6 +412,7 @@ def main() -> int:
             groups[key] = {
                 "label": label,
                 "goods_no": product["goods_no"],
+                "url": product_url(product),
                 "total": total,
                 "items": [] if baseline else items,
             }
@@ -396,6 +422,7 @@ def main() -> int:
                 state[key] = {
                     "label": label,
                     "product": product.get("name", label),
+                    "goods_no": product["goods_no"],
                     "last_no": max(newest, last_no),
                     "total": total,
                     "checked_at": datetime.now(KST).isoformat(timespec="seconds"),
