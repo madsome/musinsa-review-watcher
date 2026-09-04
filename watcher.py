@@ -45,6 +45,63 @@ import requests
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state.json"
+SETTINGS_PATH = ROOT / "settings.txt"
+LOG_PATH = ROOT / "run.log"
+
+
+class _Tee:
+    """화면과 run.log 에 동시에 쓴다. PC 에서 창 없이 돌 때 기록을 남기기 위함."""
+
+    def __init__(self, stream, fh):
+        self._stream, self._fh = stream, fh
+
+    def write(self, text):
+        if self._stream is not None:
+            try:
+                self._stream.write(text)
+            except Exception:      # noqa: BLE001  (pythonw 로 돌면 화면이 없다)
+                pass
+        self._fh.write(text)
+        self._fh.flush()
+
+    def flush(self):
+        if self._stream is not None:
+            try:
+                self._stream.flush()
+            except Exception:      # noqa: BLE001
+                pass
+        self._fh.flush()
+
+
+def start_logging() -> None:
+    """run.log 에 실행 기록을 남긴다. 너무 커지면 앞부분을 잘라낸다."""
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 1_000_000:
+            tail = LOG_PATH.read_text(encoding="utf-8", errors="replace")[-200_000:]
+            LOG_PATH.write_text(tail, encoding="utf-8")
+        fh = LOG_PATH.open("a", encoding="utf-8")
+    except Exception:              # noqa: BLE001  (로그를 못 써도 본 작업은 계속한다)
+        return
+    sys.stdout = _Tee(sys.stdout, fh)
+    sys.stderr = _Tee(sys.stderr, fh)
+
+
+def load_settings() -> None:
+    """settings.txt 의 KEY=VALUE 를 환경 변수로 올린다.
+
+    PC 에서 돌릴 때 쓴다. 이미 환경 변수가 있으면 그쪽을 우선한다.
+    (GitHub Actions 에서는 이 파일이 없고 Secrets 가 환경 변수로 들어온다.)
+    """
+    if not SETTINGS_PATH.exists():
+        return
+    for raw in SETTINGS_PATH.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and value and not os.environ.get(key):
+            os.environ[key] = value
 
 API_URL = "https://goods.musinsa.com/api2/review/v1/view/list"
 PAGE_SIZE = 20                       # 무신사 API 상한. 21 이상은 400 으로 거부됨
@@ -385,6 +442,9 @@ def send_mail(subject: str, text: str, html_body: str) -> None:
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
+    start_logging()
+    load_settings()
+
     ap = argparse.ArgumentParser(description="무신사 상품 후기 감시기")
     ap.add_argument("--init", action="store_true", help="알림 없이 현재 시점을 기준선으로 저장")
     ap.add_argument("--dry-run", action="store_true", help="메일을 보내지 않고 결과만 출력")
@@ -401,6 +461,7 @@ def main() -> int:
         )
         return 0
 
+    print(f"===== 실행 {datetime.now(KST):%Y-%m-%d %H:%M:%S} (KST) =====")
     config = load_config()
     state = load_state()
     max_pages = int(config.get("max_pages_per_run", 10))
