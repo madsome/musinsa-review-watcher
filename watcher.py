@@ -50,7 +50,22 @@ API_URL = "https://goods.musinsa.com/api2/review/v1/view/list"
 PAGE_SIZE = 20                       # 무신사 API 상한. 21 이상은 400 으로 거부됨
 KST = timezone(timedelta(hours=9))
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+      "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
+
+# 무신사가 서버에서 오는 요청을 403 으로 막는 경우가 있어, 실제 브라우저가 보내는 것과
+# 같은 헤더를 붙인다. Referer(어느 페이지에서 호출했는지)가 특히 중요하다.
+BASE_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://www.musinsa.com",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "sec-ch-ua": '"Chromium";v="140", "Not=A?Brand";v="24", "Google Chrome";v="140"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -121,11 +136,18 @@ def fetch_page(goods_no: int, page: int, session: requests.Session, option1=None
         params["selectedSimilarNo"] = goods_no
     url = f"{API_URL}?{urlencode(params)}"
 
+    headers = dict(BASE_HEADERS)
+    # 후기 페이지에서 호출한 것처럼 Referer 를 붙인다
+    headers["Referer"] = f"https://www.musinsa.com/review/goods/{goods_no}?sort=new"
+
     last_err = None
     for attempt in range(3):
         try:
-            r = session.get(url, timeout=20,
-                            headers={"User-Agent": UA, "Accept": "application/json"})
+            r = session.get(url, timeout=20, headers=headers)
+            if r.status_code == 403:
+                # 차단 사유를 로그에 남겨 두면 다음에 원인을 빨리 찾을 수 있다
+                snippet = " ".join(r.text[:200].split())
+                raise RuntimeError(f"403 차단 · 응답: {snippet or '(본문 없음)'}")
             r.raise_for_status()
             body = r.json()
             if body.get("meta", {}).get("result") != "SUCCESS" or body.get("data") is None:
@@ -435,8 +457,13 @@ def main() -> int:
             if i < len(config["products"]) - 1:
                 time.sleep(0.4)               # 상품 사이 간격
 
+    # 일부 상품이 실패해도 다음 실행에서 자동으로 다시 잡히므로 워크플로를 실패시키지 않는다.
+    # 전부 실패했을 때만 실패로 처리한다 — 그때는 API 차단이나 설정 문제일 가능성이 크다.
+    total_products = len(config["products"])
+    all_failed = len(failed) == total_products and total_products > 0
     if failed:
-        print(f"[warn] {len(failed)}개 상품 조회 실패: {', '.join(failed)}", file=sys.stderr)
+        print(f"[warn] {len(failed)}/{total_products}개 상품 조회 실패: {', '.join(failed)}"
+              f" — 다음 실행에서 다시 시도합니다.", file=sys.stderr)
 
     new_total = sum(len(g["items"]) for g in groups.values())
 
@@ -444,7 +471,7 @@ def main() -> int:
         if changed and not args.dry_run:
             save_state(state)
         print("새 후기 없음")
-        return 1 if failed else 0
+        return 1 if all_failed else 0
 
     subject = build_subject(groups)
     text = build_text(groups)
@@ -462,7 +489,7 @@ def main() -> int:
     send_mail(subject, text, html_body)
     if changed:
         save_state(state)
-    return 1 if failed else 0
+    return 1 if all_failed else 0
 
 
 if __name__ == "__main__":
